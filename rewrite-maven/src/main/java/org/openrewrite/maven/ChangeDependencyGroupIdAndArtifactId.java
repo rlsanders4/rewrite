@@ -73,7 +73,7 @@ public class ChangeDependencyGroupIdAndArtifactId extends Recipe {
 
     @Option(displayName = "Version pattern",
             description = "Allows version selection to be extended beyond the original Node Semver semantics. So for example," +
-                          "Setting 'version' to \"25-29\" can be paired with a metadata pattern of \"-jre\" to select Guava 29.0-jre",
+                    "Setting 'version' to \"25-29\" can be paired with a metadata pattern of \"-jre\" to select Guava 29.0-jre",
             example = "-jre",
             required = false)
     @Nullable
@@ -91,12 +91,18 @@ public class ChangeDependencyGroupIdAndArtifactId extends Recipe {
     @Nullable
     Boolean changeManagedDependency;
 
-    public ChangeDependencyGroupIdAndArtifactId(String oldGroupId, String oldArtifactId, @Nullable String newGroupId, @Nullable String newArtifactId, @Nullable String newVersion, @Nullable String versionPattern) {
-        this(oldGroupId, oldArtifactId, newGroupId, newArtifactId, newVersion, versionPattern, false, true);
+    @Option(displayName = "New scope",
+            description = "The new scope to use. Defaults to the existing scope.",
+            required = false)
+    @Nullable
+    String newScope;
+
+    public ChangeDependencyGroupIdAndArtifactId(String oldGroupId, String oldArtifactId, @Nullable String newGroupId, @Nullable String newArtifactId, @Nullable String newVersion, @Nullable String versionPattern, @Nullable String newScope) {
+        this(oldGroupId, oldArtifactId, newGroupId, newArtifactId, newVersion, versionPattern, false, true, newScope);
     }
 
     @JsonCreator
-    public ChangeDependencyGroupIdAndArtifactId(String oldGroupId, String oldArtifactId, @Nullable String newGroupId, @Nullable String newArtifactId, @Nullable String newVersion, @Nullable String versionPattern, @Nullable Boolean overrideManagedVersion, @Nullable Boolean changeManagedDependency) {
+    public ChangeDependencyGroupIdAndArtifactId(String oldGroupId, String oldArtifactId, @Nullable String newGroupId, @Nullable String newArtifactId, @Nullable String newVersion, @Nullable String versionPattern, @Nullable Boolean overrideManagedVersion, @Nullable Boolean changeManagedDependency, @Nullable String newScope) {
         this.oldGroupId = oldGroupId;
         this.oldArtifactId = oldArtifactId;
         this.newGroupId = newGroupId;
@@ -105,6 +111,7 @@ public class ChangeDependencyGroupIdAndArtifactId extends Recipe {
         this.versionPattern = versionPattern;
         this.overrideManagedVersion = overrideManagedVersion;
         this.changeManagedDependency = changeManagedDependency;
+        this.newScope = newScope;
     }
 
     @Override
@@ -120,27 +127,28 @@ public class ChangeDependencyGroupIdAndArtifactId extends Recipe {
     @Override
     public String getDescription() {
         return "Change a Maven dependency coordinates. The `newGroupId` or `newArtifactId` **MUST** be different from before. " +
-               "Matching `<dependencyManagement>` coordinates are also updated if a `newVersion` or `versionPattern` is provided.";
+                "Matching `<dependencyManagement>` coordinates are also updated if a `newVersion` or `versionPattern` is provided.";
     }
 
     @Override
     public Validated<Object> validate() {
         Validated<Object> validated = super.validate();
-        if (newVersion != null) {
-            validated = validated.and(Semver.validate(newVersion, versionPattern));
-        }
-        validated = validated.and(required("newGroupId", newGroupId).or(required("newArtifactId", newArtifactId)));
-        validated = validated.and(test(
-                "coordinates",
-                "newGroupId OR newArtifactId must be different from before",
-                this,
-                r -> {
-                    boolean sameGroupId = isBlank(r.newGroupId) || Objects.equals(r.oldGroupId, r.newGroupId);
-                    boolean sameArtifactId = isBlank(r.newArtifactId) || Objects.equals(r.oldArtifactId, r.newArtifactId);
-                    return !(sameGroupId && sameArtifactId);
-                }
-        ));
         return validated;
+//        if (newVersion != null) {
+//            validated = validated.and(Semver.validate(newVersion, versionPattern));
+//        }
+//        validated = validated.and(required("newGroupId", newGroupId).or(required("newArtifactId", newArtifactId)));
+//        validated = validated.and(test(
+//                "coordinates",
+//                "newGroupId OR newArtifactId must be different from before",
+//                this,
+//                r -> {
+//                    boolean sameGroupId = isBlank(r.newGroupId) || Objects.equals(r.oldGroupId, r.newGroupId);
+//                    boolean sameArtifactId = isBlank(r.newArtifactId) || Objects.equals(r.oldArtifactId, r.newArtifactId);
+//                    return !(sameGroupId && sameArtifactId);
+//                }
+//        ));
+//        return validated;
     }
 
     @Override
@@ -170,11 +178,18 @@ public class ChangeDependencyGroupIdAndArtifactId extends Recipe {
             public Xml visitTag(Xml.Tag tag, ExecutionContext ctx) {
                 Xml.Tag t = (Xml.Tag) super.visitTag(tag, ctx);
                 boolean isOldDependencyTag = isDependencyTag(oldGroupId, oldArtifactId);
+                boolean isNewDependencyTag = isDependencyTag(newGroupId, newArtifactId);
                 if (isOldDependencyTag && isNewDependencyPresent) {
                     doAfterVisit(new RemoveContentVisitor<>(tag, true, true));
                     maybeUpdateModel();
                     return t;
                 }
+                if (isNewDependencyTag && isNewDependencyPresent) {
+                    updateScope(t, ctx);
+                    maybeUpdateModel();
+                    return t;
+                }
+
                 if (isOldDependencyTag || isPluginDependencyTag(oldGroupId, oldArtifactId)) {
                     String groupId = newGroupId;
                     if (groupId != null) {
@@ -220,6 +235,7 @@ public class ChangeDependencyGroupIdAndArtifactId extends Recipe {
                             return e.warn(tag);
                         }
                     }
+                    t = updateScope(t, ctx);
                     if (t != tag) {
                         maybeUpdateModel();
                     }
@@ -275,6 +291,23 @@ public class ChangeDependencyGroupIdAndArtifactId extends Recipe {
 
                 }
                 return availableVersions.isEmpty() ? newVersion : Collections.max(availableVersions, versionComparator);
+            }
+
+            private Xml.Tag updateScope(Xml.Tag t, ExecutionContext ctx) {
+                String scope = newScope;
+                if (scope != null) {
+                    Optional<Xml.Tag> scopeTag = t.getChild("scope");
+                    if (scopeTag.isPresent()) {
+                        String scopeValue = scopeTag.get().getValue().orElse(null);
+                        if (scopeValue == null || !scopeValue.equals(scope)) {
+                            t = changeChildTagValue(t, "scope", scope, ctx);
+                        }
+                    } else {
+                        Xml.Tag newVersionTag = Xml.Tag.build("<scope>" + scope + "</scope>");
+                        t = (Xml.Tag) new AddToTagVisitor<ExecutionContext>(t, newVersionTag, new MavenTagInsertionComparator(t.getChildren())).visitNonNull(t, ctx, getCursor().getParent());
+                    }
+                }
+                return t;
             }
         };
     }
